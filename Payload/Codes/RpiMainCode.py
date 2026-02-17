@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# Main Raspberry Pi control and vision pipeline
+# Handles camera input, ball detection, and servo control
+
 """
 Ball Balancing Platform - Raspberry Pi Camera 
 """
@@ -16,9 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from collections import deque
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 420
 CAMERA_FPS_TARGET = 120
@@ -50,9 +49,8 @@ UART_TIMEOUT = 0.05
 UART_STX = 0x02
 UART_ETX = 0x03
 
-# NEW: UART buffer safety limit
-MAX_UART_BYTES_PER_READ = 512  # Prevent runaway loop
-MAX_UART_PACKET_LENGTH = 200  # Teensy packets are ~100 bytes max (safety limit)
+MAX_UART_BYTES_PER_READ = 512
+MAX_UART_PACKET_LENGTH = 200
 
 DETECTION_TIME_WARNING_MS = 50.0
 HSV_FAILURE_THRESHOLD = 0.5
@@ -66,18 +64,12 @@ FRAME_SAVE_DIR = LOG_DIR / 'frames'
 FRAME_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 FRAME_SAVE_INTERVAL = 30
 
-# ============================================================================
-# SAFE FORMATTING HELPER
-# ============================================================================
 def safe_format_float(value, decimal_places=1):
     """Format float safely, handling NaN/Inf"""
     if value is None or np.isnan(value) or np.isinf(value):
         return "N/A"
     return f"{value:.{decimal_places}f}"
 
-# ============================================================================
-# CRC16
-# ============================================================================
 def crc16_ccitt(data):
     crc = 0xFFFF
     for byte in data:
@@ -90,9 +82,6 @@ def crc16_ccitt(data):
             crc &= 0xFFFF
     return crc
 
-# ============================================================================
-# BALL DETECTOR
-# ============================================================================
 class BallDetector:
     """Detects red ball with HSV + Hough Circle fallback"""
     
@@ -277,9 +266,6 @@ class BallDetector:
         self.hsv_attempts = 0
         self.detection_times.clear()
 
-# ============================================================================
-# UART HANDLER - IMPROVED with buffer limit
-# ============================================================================
 class UARTHandler:
     """Handle UART with graceful degradation and buffer protection"""
     
@@ -307,8 +293,7 @@ class UARTHandler:
             timeout=UART_TIMEOUT
         )
         
-        # CRITICAL: Flush any stale data from previous session
-        time.sleep(0.1)  # Let any in-flight bytes arrive
+        time.sleep(0.1)
         self.serial_port.reset_input_buffer()
         self.serial_port.reset_output_buffer()
         
@@ -322,7 +307,6 @@ class UARTHandler:
             return None
         
         try:
-            # NEW: Bounded loop to prevent buffer overflow hang
             bytes_checked = 0
             
             while self.serial_port.in_waiting > 0 and bytes_checked < MAX_UART_BYTES_PER_READ:
@@ -337,11 +321,10 @@ class UARTHandler:
                     
                     length = length_byte[0]
                     
-                    # CRITICAL: Validate packet length BEFORE reading
                     if length > MAX_UART_PACKET_LENGTH or length < 10:
                         print(f"⚠ Invalid packet length: {length} bytes - skipping")
                         self.crc_failures += 1
-                        continue  # Skip this packet, keep looking for next STX
+                        continue
                     
                     payload = self.serial_port.read(length)
                     if len(payload) != length:
@@ -367,9 +350,8 @@ class UARTHandler:
                         self.packets_received += 1
                         self.last_data = data_str
                         
-                        # Check for emergency stop
                         parts = data_str.split(',')
-                        if len(parts) > 4:  # Use > for safety
+                        if len(parts) > 4:
                             try:
                                 estop = int(parts[4])
                                 if estop == 1 and not self.emergency_stop_detected:
@@ -418,9 +400,6 @@ class UARTHandler:
             except Exception as e:
                 print(f"⚠ UART close error: {e}")
 
-# ============================================================================
-# CSV LOGGER - IMPROVED with defensive parsing
-# ============================================================================
 class CSVLogger:
     """Log data to CSV with safe parsing"""
     
@@ -457,7 +436,6 @@ class CSVLogger:
         """Log with defensive parsing"""
         frame_timestamp_ms = int(time.time() * 1000)
         
-        # Initialize with defaults
         teensy_timestamp_us = ''
         touch_x = ''
         touch_y = ''
@@ -471,17 +449,14 @@ class CSVLogger:
         imu_pitch = ''
         imu_yaw = ''
         
-        # IMPROVED: Defensive parsing with explicit bounds
         if teensy_data:
             parts = teensy_data.split(',')
             
-            # Basic fields (always present)
             teensy_timestamp_us = parts[0] if len(parts) > 0 else ''
             touch_x = parts[1] if len(parts) > 1 else ''
             touch_y = parts[2] if len(parts) > 2 else ''
             ball_detected = parts[3] if len(parts) > 3 else ''
             
-            # Handle new format (with emergency_stop) vs old format
             if len(parts) >= 9:
                 emergency_stop = parts[4]
                 plate_cmd_x = parts[5]
@@ -493,7 +468,7 @@ class CSVLogger:
                     imu_roll = parts[9]
                     imu_pitch = parts[10]
                     imu_yaw = parts[11]
-            elif len(parts) >= 8:  # Old format
+            elif len(parts) >= 8:
                 plate_cmd_x = parts[4]
                 plate_cmd_y = parts[5]
                 servo_actual_x = parts[6]
@@ -539,9 +514,6 @@ class CSVLogger:
             except Exception as e:
                 print(f"⚠ Log close error: {e}")
 
-# ============================================================================
-# FRAME SAVER - NEW non-blocking background thread
-# ============================================================================
 class FrameSaver:
     """Background thread for non-blocking frame saving"""
     
@@ -564,12 +536,11 @@ class FrameSaver:
             try:
                 frame_data = self.frame_queue.get(timeout=1.0)
                 
-                if frame_data is None:  # Shutdown signal
+                if frame_data is None:
                     break
                 
                 frame_filename, display = frame_data
                 
-                # NEW: Check write success and detect filesystem issues
                 try:
                     success = cv2.imwrite(str(frame_filename), display)
                     
@@ -587,7 +558,6 @@ class FrameSaver:
                 self.frame_queue.task_done()
                 
             except Exception:
-                # Timeout or other error - continue
                 pass
     
     def save_frame_async(self, frame_filename, display):
@@ -596,23 +566,19 @@ class FrameSaver:
             return
         
         try:
-            # Try to enqueue, skip if full (don't block main loop)
             self.frame_queue.put_nowait((frame_filename, display.copy()))
         except Full:
-            pass  # Queue full, skip this frame
+            pass
     
     def shutdown(self):
         """Shutdown frame saver thread"""
         if SAVE_FRAMES and self.running:
             self.running = False
-            self.frame_queue.put(None)  # Signal shutdown
+            self.frame_queue.put(None)
             if self.thread:
                 self.thread.join(timeout=5.0)
             print(f"✓ Frame saver shutdown ({self.frames_saved} frames saved)")
 
-# ============================================================================
-# MAIN OBSERVER CLASS - IMPROVED
-# ============================================================================
 class SensorComparisonObserver:
     """Camera observer with non-blocking frame saving"""
     
@@ -623,7 +589,7 @@ class SensorComparisonObserver:
         self.detector = BallDetector()
         self.uart = UARTHandler()
         self.logger = CSVLogger()
-        self.frame_saver = FrameSaver()  # NEW
+        self.frame_saver = FrameSaver()
         
         self.camera = self._init_camera()
         
@@ -631,12 +597,10 @@ class SensorComparisonObserver:
         self.detection_count = 0
         self.start_time = time.time()
         
-        # NEW: FPS measurement
         self.last_frame_time = None
         self.actual_fps_samples = deque(maxlen=100)
         self.fps_warning_shown = False
         
-        # NEW: Latency measurement
         self.latency_samples = deque(maxlen=100)
         
         print()
@@ -701,13 +665,11 @@ class SensorComparisonObserver:
                     print("Failed to read frame")
                     break
                 
-                # NEW: Measure actual FPS
                 if self.last_frame_time is not None:
                     frame_interval = frame_start - self.last_frame_time
                     actual_fps = 1.0 / frame_interval if frame_interval > 0 else 0
                     self.actual_fps_samples.append(actual_fps)
                     
-                    # Warn if significantly below target (only once)
                     if len(self.actual_fps_samples) >= 50 and not self.fps_warning_shown:
                         avg_fps = sum(self.actual_fps_samples) / len(self.actual_fps_samples)
                         
@@ -719,16 +681,13 @@ class SensorComparisonObserver:
                 
                 self.last_frame_time = frame_start
                 
-                # Detect ball
                 ball_x_mm, ball_y_mm, ball_x_px, ball_y_px, radius_px, mask, method = \
                     self.detector.detect(frame)
                 
                 detected = (ball_x_mm is not None)
                 
-                # Read Teensy telemetry
                 teensy_data = self.uart.read_teensy_data()
                 
-                # NEW: Measure control latency (approximate)
                 if teensy_data and ball_x_mm is not None:
                     parts = teensy_data.split(',')
                     if len(parts) > 0:
@@ -736,28 +695,23 @@ class SensorComparisonObserver:
                             teensy_timestamp_us = int(parts[0])
                             pi_timestamp_us = int(time.time() * 1e6)
                             
-                            # Latency = time difference (rough estimate due to unsynchronized clocks)
                             latency_ms = abs(pi_timestamp_us - teensy_timestamp_us) / 1000.0
                             
-                            # Only consider reasonable values (clocks roughly synced within 1 second)
                             if latency_ms < 1000:
                                 self.latency_samples.append(latency_ms)
                         except (ValueError, IndexError):
                             pass
                 
-                # Log
                 self.logger.log(teensy_data, ball_x_mm, ball_y_mm, method)
                 
                 self.frame_count += 1
                 if detected:
                     self.detection_count += 1
                 
-                # Create display
                 display = self.create_display(frame, mask, ball_x_mm, ball_y_mm,
                                              ball_x_px, ball_y_px, radius_px,
                                              teensy_data, method)
                 
-                # IMPROVED: Non-blocking frame save
                 if SAVE_FRAMES and (self.frame_count % FRAME_SAVE_INTERVAL == 0):
                     frame_filename = FRAME_SAVE_DIR / f'frame_{self.frame_count:06d}.jpg'
                     self.frame_saver.save_frame_async(frame_filename, display)
@@ -802,7 +756,6 @@ class SensorComparisonObserver:
         cv2.drawMarker(display, (center_x, center_y), (0, 255, 0),
                       cv2.MARKER_CROSS, 20, 2)
         
-        # Draw detection - IMPROVED with safe formatting
         if ball_x_mm is not None and ball_x_px is not None:
             color = (0, 0, 255) if method == 'HSV' else (255, 0, 255)
             cv2.circle(display, (ball_x_px, ball_y_px), radius_px, color, 2)
@@ -810,14 +763,12 @@ class SensorComparisonObserver:
             cv2.line(display, (center_x, center_y), (ball_x_px, ball_y_px),
                     (255, 255, 0), 1)
             
-            # IMPROVED: Safe float formatting
             x_str = safe_format_float(ball_x_mm)
             y_str = safe_format_float(ball_y_mm)
             cv2.putText(display, f"Camera[{method}]: ({x_str}, {y_str}) mm",
                        (ball_x_px + 15, ball_y_px - 15),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         
-        # Stats
         runtime = time.time() - self.start_time
         fps = self.frame_count / runtime if runtime > 0 else 0
         detection_rate = (self.detection_count / self.frame_count * 100) if self.frame_count > 0 else 0
@@ -838,10 +789,9 @@ class SensorComparisonObserver:
         cv2.putText(display, f"Process: {avg_time:.1f} ms", (10, y_pos),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, time_color, 1)
         
-        # Teensy data
         if teensy_data:
             parts = teensy_data.split(',')
-            if len(parts) > 2:  # Defensive check
+            if len(parts) > 2:
                 y_pos += 30
                 touch_x = parts[1] if len(parts) > 1 else "N/A"
                 touch_y = parts[2] if len(parts) > 2 else "N/A"
@@ -849,7 +799,6 @@ class SensorComparisonObserver:
                            (10, y_pos),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                 
-                # Sensor agreement
                 if ball_x_mm is not None and len(parts) > 2:
                     try:
                         touch_x_f = float(parts[1])
@@ -863,14 +812,12 @@ class SensorComparisonObserver:
                     except (ValueError, IndexError):
                         pass
         
-        # UART stats
         y_pos = CAMERA_HEIGHT - 30
         uart_stats = self.uart.get_stats()
         uart_color = (0, 0, 255) if "E-STOP" in uart_stats else (255, 255, 255)
         cv2.putText(display, uart_stats, (10, y_pos),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, uart_color, 1)
         
-        # Mask
         mask_color = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         mask_small = cv2.resize(mask_color, (160, 120))
         display[10:130, CAMERA_WIDTH-170:CAMERA_WIDTH-10] = mask_small
@@ -881,7 +828,6 @@ class SensorComparisonObserver:
         """IMPROVED: Safe cleanup with exception handling"""
         print("\nShutting down...")
         
-        # IMPROVED: Camera release with exception handling
         if self.camera:
             try:
                 self.camera.release()
@@ -891,7 +837,7 @@ class SensorComparisonObserver:
         
         self.uart.close()
         self.logger.close()
-        self.frame_saver.shutdown()  # NEW
+        self.frame_saver.shutdown()
         
         cv2.destroyAllWindows()
         
@@ -905,7 +851,6 @@ class SensorComparisonObserver:
         print(f"  Frames: {self.frame_count}")
         print(f"  Average FPS: {fps:.1f}")
         
-        # NEW: Report actual measured FPS
         actual_fps = self.get_actual_fps()
         if actual_fps > 0:
             print(f"  Actual measured FPS: {actual_fps:.1f} (target was {CAMERA_FPS_TARGET})")
@@ -916,7 +861,6 @@ class SensorComparisonObserver:
         print(f"  {self.detector.get_detection_stats()}")
         print(f"  Avg process time: {self.detector.get_avg_process_time():.1f} ms")
         
-        # NEW: Report control loop latency
         avg_latency = self.get_avg_latency()
         if avg_latency > 0:
             print(f"  Avg control latency: {avg_latency:.1f} ms")
@@ -928,9 +872,6 @@ class SensorComparisonObserver:
             print(f"  Frames saved: {self.frame_saver.frames_saved}")
         print("=" * 70)
 
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
 def main():
     try:
         observer = SensorComparisonObserver()
